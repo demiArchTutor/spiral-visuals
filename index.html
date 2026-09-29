@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spiral Visuals</title>
+  <link rel="stylesheet" href="./css/styles.css">
+  <script type="module" src="./js/app.js"></script>
+</head>
+<body>
+  <main class="visualizer-shell" data-app="spiral-visuals">
+    <video id="bg-video" class="background-video" playsinline></video>
+    <canvas id="visualizer" class="visualizer-canvas"></canvas>
+
+    <section id="drop-zone" class="drop-zone" data-visibility="visible" data-mode="accepted" aria-label="Media drop hint" aria-hidden="false">
+      <div class="drop-card">
+        <p id="drop-title" class="drop-title">Drag &amp; drop audio or video</p>
+        <p id="drop-types" class="drop-types">MP3 · WAV · MP4</p>
+        <p id="status-text" class="status-text" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <aside class="control-shell" aria-label="Visualizer controls">
+      <section id="control-panel" class="control-panel">
+        <div class="tab-hover-rail" aria-label="Spiral tab hover rail">
+          <div id="spiral-tabs" class="spiral-tabs" aria-label="Spirals"></div>
+        </div>
+
+        <header class="panel-header">
+          <div class="panel-title-block">
+            <p class="eyebrow">Spiral Visuals</p>
+            <h2>Controls</h2>
+          </div>
+          <div class="panel-actions" aria-label="Project actions">
+            <button type="button" class="header-button" data-action="restart-media" title="Restart media from the beginning">Restart</button>
+            <button type="button" class="header-button is-active" data-action="toggle-active" aria-pressed="true">Active</button>
+            <button type="button" class="header-button" data-action="save-project" title="Copy spiral JSON">Save</button>
+            <button type="button" class="header-button" data-action="load-project" title="Append spirals from JSON">Load</button>
+          </div>
+        </header>
+
+        <section class="active-spiral-shell">
+          <header id="active-spiral-header" class="active-spiral-header"></header>
+          <div id="active-spiral-controls" class="active-spiral-controls"></div>
+        </section>
+      </section>
+    </aside>
+
+    <section id="project-modal" class="project-modal" hidden aria-labelledby="project-modal-title" aria-modal="true" role="dialog">
+      <div class="project-modal-card">
+        <header class="project-modal-header">
+          <div>
+            <p class="eyebrow">Spiral JSON</p>
+            <h2 id="project-modal-title">Save Spirals</h2>
+          </div>
+          <button type="button" class="project-modal-close" data-action="close-project-modal" aria-label="Close">×</button>
+        </header>
+        <p id="project-modal-description" class="project-modal-description"></p>
+        <textarea id="project-json" class="project-json" spellcheck="false" aria-label="Spiral JSON"></textarea>
+        <div class="project-modal-footer">
+          <p id="project-modal-status" class="project-modal-status" role="status" aria-live="polite"></p>
+          <div class="project-modal-actions">
+            <button type="button" class="small-button" data-action="copy-project-json">Copy</button>
+            <button type="button" class="small-button" data-action="paste-project-json">Paste</button>
+            <button type="button" class="small-button small-button--primary" data-action="apply-project-json">Apply</button>
+            <button type="button" class="small-button" data-action="close-project-modal">Close</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
