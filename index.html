@@ -58,8 +58,11 @@
         <p id="project-modal-description" class="project-modal-description"></p>
         <textarea id="project-json" class="project-json" spellcheck="false" aria-label="Spiral JSON"></textarea>
         <div class="project-modal-footer">
-          <p id="project-modal-status" class="project-modal-status" role="status" aria-live="polite"></p>
+          <div class="project-modal-notes">
+            <p id="project-modal-status" class="project-modal-status" role="status" aria-live="polite"></p>
+          </div>
           <div class="project-modal-actions">
+            <p id="project-modal-helper" class="project-modal-helper" hidden>Paste with Ctrl+V / Cmd+V or the 'Apply' button.<br>- Your browser may ask permission to allow -</p>
             <button type="button" class="small-button" data-action="copy-project-json">Copy</button>
             <button type="button" class="small-button" data-action="paste-project-json">Paste</button>
             <button type="button" class="small-button small-button--primary" data-action="apply-project-json">Apply</button>
