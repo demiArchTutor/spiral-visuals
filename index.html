@@ -9,21 +9,22 @@
 </head>
 <body>
   <main class="visualizer-shell" data-app="spiral-visuals">
-    <video id="bg-video" class="background-video" playsinline></video>
+    <div id="media-layer-stack" class="media-layer-stack" aria-hidden="true"></div>
     <canvas id="visualizer" class="visualizer-canvas"></canvas>
+    <input id="media-file-input" class="visually-hidden" type="file" accept=".gif,.wav,.mp3,.m4a,.mp4,.webm" tabindex="-1" aria-hidden="true">
 
     <section id="drop-zone" class="drop-zone" data-visibility="visible" data-mode="accepted" aria-label="Media drop hint" aria-hidden="false">
       <div class="drop-card">
-        <p id="drop-title" class="drop-title">Drag &amp; drop audio or video</p>
-        <p id="drop-types" class="drop-types">MP3 · WAV · MP4</p>
+        <p id="drop-title" class="drop-title">Drag &amp; drop audio, video, or GIF</p>
+        <p id="drop-types" class="drop-types">.GIF · .WAV · .MP3 · .M4A · .MP4 · .WEBM</p>
         <p id="status-text" class="status-text" role="status" aria-live="polite"></p>
       </div>
     </section>
 
     <aside class="control-shell" aria-label="Visualizer controls">
       <section id="control-panel" class="control-panel">
-        <div class="tab-hover-rail" aria-label="Spiral tab hover rail">
-          <div id="spiral-tabs" class="spiral-tabs" aria-label="Spirals"></div>
+        <div class="tab-hover-rail" aria-label="Layer tab hover rail">
+          <div id="spiral-tabs" class="spiral-tabs" aria-label="Layers"></div>
         </div>
 
         <header class="panel-header">
@@ -34,8 +35,8 @@
           <div class="panel-actions" aria-label="Project actions">
             <button type="button" class="header-button" data-action="restart-media" title="Restart media from the beginning">Restart</button>
             <button type="button" class="header-button is-active" data-action="toggle-active" aria-pressed="true">Active</button>
-            <button type="button" class="header-button" data-action="save-project" title="Copy spiral JSON">Save</button>
-            <button type="button" class="header-button" data-action="load-project" title="Append spirals from JSON">Load</button>
+            <button type="button" class="header-button" data-action="save-project" title="Copy layer JSON">Save</button>
+            <button type="button" class="header-button" data-action="load-project" title="Append layers from JSON">Load</button>
           </div>
         </header>
 
@@ -50,13 +51,13 @@
       <div class="project-modal-card">
         <header class="project-modal-header">
           <div>
-            <p class="eyebrow">Spiral JSON</p>
-            <h2 id="project-modal-title">Save Spirals</h2>
+            <p class="eyebrow">Layer JSON</p>
+            <h2 id="project-modal-title">Save Layers</h2>
           </div>
           <button type="button" class="project-modal-close" data-action="close-project-modal" aria-label="Close">×</button>
         </header>
         <p id="project-modal-description" class="project-modal-description"></p>
-        <textarea id="project-json" class="project-json" spellcheck="false" aria-label="Spiral JSON"></textarea>
+        <textarea id="project-json" class="project-json" spellcheck="false" aria-label="Layer JSON"></textarea>
         <div class="project-modal-footer">
           <div class="project-modal-notes">
             <p id="project-modal-status" class="project-modal-status" role="status" aria-live="polite"></p>

@@ -1,10 +1,36 @@
 import { bindMediaDropEvents, bindPanelEvents, bindPlaybackShortcuts } from './events.js';
-import { ENGINE_SETTINGS, state } from './state.js';
+import {
+  AUDIO_FREQUENCY_POINTS,
+  ENGINE_SETTINGS,
+  getMediaLayer,
+  normalizeAudioCurve,
+  state,
+} from './state.js';
+import {
+  getAudioSampleRate,
+  getMediaRuntime,
+  handleActiveChanged,
+  processMediaFile,
+  restartAllMedia,
+  syncAllMediaRuntimes,
+  updateMediaAnalysis,
+  updateMediaFades,
+} from './media-runtime.js';
 import { renderPanel, updateActiveButton } from './ui.js';
 
 const canvas = document.getElementById('visualizer');
 const ctx = canvas.getContext('2d');
-const bgVideo = document.getElementById('bg-video');
+const spiralRuntimeById = new Map();
+const TAU = Math.PI * 2;
+const RADIAL_STEP = 4;
+const GEOMETRY_STRIDE = 6;
+const GEO_CORE_X = 0;
+const GEO_CORE_Y = 1;
+const GEO_PERP_X = 2;
+const GEO_PERP_Y = 3;
+const GEO_HALF_THICKNESS = 4;
+const GEO_ALPHA_SCALE = 5;
+let globalRotation = 0;
 
 function resizeCanvas() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -15,194 +41,240 @@ function resizeCanvas() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-function ensureAudioGraph() {
-  if (!state.audio.context) {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    state.audio.context = new AudioContextClass();
-  }
-
-  if (!state.audio.sourceNode) {
-    state.audio.sourceNode = state.audio.context.createMediaElementSource(bgVideo);
-    state.audio.analyser = state.audio.context.createAnalyser();
-    state.audio.analyser.fftSize = 512;
-    state.audio.dataArray = new Uint8Array(state.audio.analyser.frequencyBinCount);
-
-    state.audio.sourceNode.connect(state.audio.analyser);
-    state.audio.analyser.connect(state.audio.context.destination);
-  }
-}
-
-async function processMediaFile(file) {
-  bgVideo.pause();
-  state.media.isPlaying = false;
-  state.media.resumeOnActive = false;
-
-  if (state.media.objectUrl) {
-    URL.revokeObjectURL(state.media.objectUrl);
-  }
-
-  ensureAudioGraph();
-  if (state.audio.context.state === 'suspended') {
-    await state.audio.context.resume();
-  }
-
-  const objectUrl = URL.createObjectURL(file);
-  state.media.objectUrl = objectUrl;
-  state.media.kind = file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.mp4')
-    ? 'video'
-    : 'audio';
-
-  bgVideo.src = objectUrl;
-  bgVideo.style.opacity = ENGINE_SETTINGS.videoAlpha;
-  bgVideo.style.display = state.media.kind === 'video' ? 'block' : 'none';
-
-  try {
-    await bgVideo.play();
-    state.media.isPlaying = true;
-    state.media.resumeOnActive = false;
-    return { ok: true };
-  } catch (error) {
-    console.error(error);
-    return {
-      ok: false,
-      message: 'The browser could not start playback for that media file.',
+function getSpiralRuntime(spiral) {
+  let runtime = spiralRuntimeById.get(spiral.id);
+  if (!runtime) {
+    runtime = {
+      pulsePos: spiral.pulsePos,
+      authoredPulsePos: spiral.pulsePos,
+      geometry: new Float32Array(0),
+      geometryPointCount: 0,
+      geometryPointsPerArm: 0,
+      audioWeightCache: null,
     };
+    spiralRuntimeById.set(spiral.id, runtime);
   }
+  if (runtime.authoredPulsePos !== spiral.pulsePos) {
+    runtime.authoredPulsePos = spiral.pulsePos;
+    runtime.pulsePos = spiral.pulsePos;
+  }
+  return runtime;
 }
 
-function updateAudioLevels() {
-  if (!state.media.isPlaying || !state.audio.analyser || !state.audio.dataArray) {
-    state.audio.bass = 0;
-    state.audio.vocals = 0;
-    return;
+function interpolateCurveWeight(curve, frequencyHz) {
+  const firstHz = AUDIO_FREQUENCY_POINTS[0].hz;
+  const lastHz = AUDIO_FREQUENCY_POINTS.at(-1).hz;
+  const frequency = Math.max(firstHz, Math.min(lastHz, frequencyHz));
+  const logFrequency = Math.log(frequency);
+  for (let index = 0; index < AUDIO_FREQUENCY_POINTS.length - 1; index += 1) {
+    const left = AUDIO_FREQUENCY_POINTS[index].hz;
+    const right = AUDIO_FREQUENCY_POINTS[index + 1].hz;
+    if (frequency > right) continue;
+    const logLeft = Math.log(left);
+    const span = Math.log(right) - logLeft;
+    const t = span <= 0 ? 0 : (logFrequency - logLeft) / span;
+    return curve[index] + ((curve[index + 1] - curve[index]) * t);
   }
-
-  state.audio.analyser.getByteFrequencyData(state.audio.dataArray);
-
-  let bassSum = 0;
-  for (let i = 0; i < 10; i += 1) bassSum += state.audio.dataArray[i];
-  state.audio.bass = (bassSum / 10) / 255;
-
-  let vocalSum = 0;
-  for (let i = 20; i < 65; i += 1) vocalSum += state.audio.dataArray[i];
-  state.audio.vocals = (vocalSum / 45) / 255;
+  return curve[curve.length - 1];
 }
 
-function getEffectiveConfig(spiral) {
-  const config = { ...spiral };
-
-  if (spiral.audioProfile === 'bass') {
-    config.maxThickness = 6 + (state.audio.bass * 40);
-    config.speed = 0.2 + (state.audio.bass * 1.8);
-  } else if (spiral.audioProfile === 'vocals') {
-    config.pulseSpeed = 1.5 + (state.audio.vocals * 16);
-    config.baseWidth = 1 + (state.audio.vocals * 3.5);
+function getAudioWeightCache(spiral, spiralRuntime, dataLength, sampleRate) {
+  const previous = spiralRuntime.audioWeightCache;
+  if (
+    previous
+    && previous.curveRef === spiral.audioCurve
+    && previous.dataLength === dataLength
+    && previous.sampleRate === sampleRate
+  ) {
+    return previous;
   }
 
-  return config;
+  const curve = normalizeAudioCurve(spiral.audioCurve);
+  const weights = new Float32Array(dataLength);
+  const nyquist = sampleRate / 2;
+  const firstHz = AUDIO_FREQUENCY_POINTS[0].hz;
+  const lastHz = AUDIO_FREQUENCY_POINTS.at(-1).hz;
+  let totalWeight = 0;
+  let firstBin = dataLength;
+  let lastBin = 0;
+
+  for (let index = 1; index < dataLength; index += 1) {
+    const frequencyHz = (index / dataLength) * nyquist;
+    if (frequencyHz < firstHz || frequencyHz > lastHz) continue;
+    const weight = interpolateCurveWeight(curve, frequencyHz);
+    if (weight <= 0) continue;
+    weights[index] = weight;
+    totalWeight += weight;
+    if (index < firstBin) firstBin = index;
+    lastBin = index;
+  }
+
+  const next = {
+    curveRef: spiral.audioCurve,
+    dataLength,
+    sampleRate,
+    weights,
+    totalWeight,
+    firstBin: firstBin === dataLength ? 0 : firstBin,
+    lastBin,
+  };
+  spiralRuntime.audioWeightCache = next;
+  return next;
 }
 
-function updatePulsePosition(spiral, config, maxRadius) {
+function getSpiralAudioLevel(spiral, spiralRuntime, sampleRate) {
+  if (!spiral.audioSourceId) return 0;
+  const mediaRuntime = getMediaRuntime(spiral.audioSourceId);
+  const media = getMediaLayer(spiral.audioSourceId);
+  if (
+    !mediaRuntime
+    || !media?.enabled
+    || !mediaRuntime.dataArray
+    || !mediaRuntime.analyser
+    || !(mediaRuntime.element instanceof HTMLMediaElement)
+    || mediaRuntime.element.paused
+    || mediaRuntime.element.ended
+  ) return 0;
+
+  const cache = getAudioWeightCache(spiral, spiralRuntime, mediaRuntime.dataArray.length, sampleRate);
+  if (cache.totalWeight <= 0) return 0;
+
+  let weightedEnergy = 0;
+  for (let index = cache.firstBin; index <= cache.lastBin; index += 1) {
+    const weight = cache.weights[index];
+    if (weight > 0) weightedEnergy += (mediaRuntime.dataArray[index] / 255) * weight;
+  }
+  return weightedEnergy / cache.totalWeight;
+}
+
+function getEffectiveConfig(spiral, spiralRuntime, sampleRate) {
+  const response = getSpiralAudioLevel(spiral, spiralRuntime, sampleRate);
+  if (response <= 0) return spiral;
+
+  return {
+    ...spiral,
+    maxThickness: spiral.maxThickness + (response * 24),
+    speed: spiral.speed * (1 + (response * 1.5)),
+    pulseSpeed: spiral.pulseSpeed * (1 + (response * 1.5)),
+    pulseIntensity: spiral.pulseIntensity + (response * 16),
+  };
+}
+
+function updatePulsePosition(runtime, config, maxRadius) {
   if (!config.pulseEnabled) return;
 
   const finalStartRadius = Math.max(2, config.startRadius);
-  if (!Number.isFinite(spiral.runtimePulsePos)) {
-    spiral.runtimePulsePos = spiral.pulsePos;
-  }
+  runtime.pulsePos += config.pulseSpeed * config.pulseDirection;
 
-  spiral.runtimePulsePos += config.pulseSpeed * config.pulseDirection;
-
-  if (config.pulseDirection === 1 && spiral.runtimePulsePos > maxRadius) {
-    spiral.runtimePulsePos = finalStartRadius;
-  } else if (config.pulseDirection === -1 && spiral.runtimePulsePos < finalStartRadius) {
-    spiral.runtimePulsePos = maxRadius;
+  if (config.pulseDirection === 1 && runtime.pulsePos > maxRadius) {
+    runtime.pulsePos = finalStartRadius;
+  } else if (config.pulseDirection === -1 && runtime.pulsePos < finalStartRadius) {
+    runtime.pulsePos = maxRadius;
   }
 }
 
-function drawSpiralPolygon(spiral, config, glowMultiplier = 1, isGlowPass = false) {
-  const width = window.innerWidth;
-  const height = window.innerHeight;
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const maxRadius = Math.max(width, height) * 0.6;
-  const finalStartRadius = Math.max(2, config.startRadius);
+function ensureGeometryCapacity(runtime, pointCount) {
+  const requiredLength = pointCount * GEOMETRY_STRIDE;
+  if (runtime.geometry.length >= requiredLength) return;
+  let nextLength = Math.max(GEOMETRY_STRIDE * 256, runtime.geometry.length || 0);
+  while (nextLength < requiredLength) nextLength *= 2;
+  runtime.geometry = new Float32Array(nextLength);
+}
 
-  if (!isGlowPass) updatePulsePosition(spiral, config, maxRadius);
+function buildSpiralGeometry(runtime, config, frame) {
+  const finalStartRadius = Math.max(2, config.startRadius);
+  const radiusSpan = Math.max(1, frame.maxRadius - finalStartRadius);
+  const pointsPerArm = Math.max(0, Math.ceil((frame.maxRadius - finalStartRadius) / RADIAL_STEP));
+  const pointCount = pointsPerArm * config.arms;
+  ensureGeometryCapacity(runtime, pointCount);
+  runtime.geometryPointCount = pointCount;
+  runtime.geometryPointsPerArm = pointsPerArm;
+
+  updatePulsePosition(runtime, config, frame.maxRadius);
+
+  const geometry = runtime.geometry;
+  const rotationOffset = globalRotation * config.speed;
+  const fadeFactor = Math.min(100, config.fadeLength) / 100;
+  const exponential = config.expansionType === 'exponential';
+  let pointIndex = 0;
 
   for (let arm = 0; arm < config.arms; arm += 1) {
-    const armOffset = (arm * 2 * Math.PI) / config.arms;
-    let prevLx;
-    let prevLy;
-    let prevRx;
-    let prevRy;
-    let isFirstSegment = true;
+    const armOffset = (arm * TAU) / config.arms;
 
-    for (let radius = finalStartRadius; radius < maxRadius; radius += 4) {
-      const theta = config.expansionType === 'exponential'
-        ? (Math.sqrt(radius) * config.tightness) * config.direction + (state.animation.globalRotation * config.speed) + armOffset
-        : (radius * config.tightness * 0.05) * config.direction + (state.animation.globalRotation * config.speed) + armOffset;
-
-      const progress = (radius - finalStartRadius) / Math.max(1, maxRadius - finalStartRadius);
-      let thickness = config.baseWidth;
-
-      if (config.taperEnabled) {
-        thickness = config.baseWidth + (progress * (config.maxThickness - config.baseWidth));
-      }
+    for (let point = 0; point < pointsPerArm; point += 1) {
+      const radius = finalStartRadius + (point * RADIAL_STEP);
+      const theta = exponential
+        ? (Math.sqrt(radius) * config.tightness) * config.direction + rotationOffset + armOffset
+        : (radius * config.tightness * 0.05) * config.direction + rotationOffset + armOffset;
+      const cosTheta = Math.cos(theta);
+      const sinTheta = Math.sin(theta);
+      const progress = (radius - finalStartRadius) / radiusSpan;
+      let thickness = config.taperEnabled
+        ? config.baseWidth + (progress * (config.maxThickness - config.baseWidth))
+        : config.baseWidth;
 
       if (config.pulseEnabled) {
-        const distanceToPulse = Math.abs(radius - spiral.runtimePulsePos);
+        const distanceToPulse = Math.abs(radius - runtime.pulsePos);
         if (distanceToPulse < config.pulseLength) {
           const profile = 1 - (distanceToPulse / config.pulseLength);
           let smoothLump = (1 - Math.cos(profile * Math.PI)) / 2;
-          if (radius < finalStartRadius + 45) {
-            smoothLump *= (radius - finalStartRadius) / 45;
-          }
+          if (radius < finalStartRadius + 45) smoothLump *= (radius - finalStartRadius) / 45;
           thickness += smoothLump * config.pulseIntensity;
         }
       }
 
-      thickness *= glowMultiplier;
-
-      const perpendicular = theta + Math.PI / 2;
-      const halfThickness = thickness / 2;
-      const coreX = centerX + Math.cos(theta) * radius;
-      const coreY = centerY + Math.sin(theta) * radius;
-      const lx = coreX + Math.cos(perpendicular) * halfThickness;
-      const ly = coreY + Math.sin(perpendicular) * halfThickness;
-      const rx = coreX - Math.cos(perpendicular) * halfThickness;
-      const ry = coreY - Math.sin(perpendicular) * halfThickness;
-
-      if (!isFirstSegment) {
-        const fadeFactor = Math.min(100, config.fadeLength) / 100;
-        let alphaScale = 1;
-
-        if (config.fadeType === 'outward') {
-          alphaScale = progress < fadeFactor ? 1 - (progress / fadeFactor) : 0;
-        } else if (config.fadeType === 'inward') {
-          alphaScale = progress < fadeFactor ? progress / fadeFactor : 1;
-        }
-
-        const finalAlpha = isGlowPass
-          ? config.alpha * alphaScale * 0.3
-          : config.alpha * alphaScale;
-
-        if (finalAlpha > 0.005) {
-          ctx.fillStyle = `hsla(${config.hue}, 100%, 50%, ${finalAlpha})`;
-          ctx.beginPath();
-          ctx.moveTo(prevLx, prevLy);
-          ctx.lineTo(lx, ly);
-          ctx.lineTo(rx, ry);
-          ctx.lineTo(prevRx, prevRy);
-          ctx.closePath();
-          ctx.fill();
-        }
+      let alphaScale = 1;
+      if (config.fadeType === 'outward') {
+        alphaScale = progress < fadeFactor ? 1 - (progress / fadeFactor) : 0;
+      } else if (config.fadeType === 'inward') {
+        alphaScale = progress < fadeFactor ? progress / fadeFactor : 1;
       }
 
-      prevLx = lx;
-      prevLy = ly;
-      prevRx = rx;
-      prevRy = ry;
-      isFirstSegment = false;
+      const offset = pointIndex * GEOMETRY_STRIDE;
+      geometry[offset + GEO_CORE_X] = frame.centerX + (cosTheta * radius);
+      geometry[offset + GEO_CORE_Y] = frame.centerY + (sinTheta * radius);
+      geometry[offset + GEO_PERP_X] = -sinTheta;
+      geometry[offset + GEO_PERP_Y] = cosTheta;
+      geometry[offset + GEO_HALF_THICKNESS] = thickness / 2;
+      geometry[offset + GEO_ALPHA_SCALE] = alphaScale;
+      pointIndex += 1;
+    }
+  }
+}
+
+function drawSpiralGeometry(runtime, config, thicknessMultiplier = 1, alphaMultiplier = 1) {
+  const geometry = runtime.geometry;
+  const pointsPerArm = runtime.geometryPointsPerArm;
+  if (pointsPerArm < 2) return;
+
+  for (let arm = 0; arm < config.arms; arm += 1) {
+    const armStart = arm * pointsPerArm;
+    for (let point = 1; point < pointsPerArm; point += 1) {
+      const previousOffset = (armStart + point - 1) * GEOMETRY_STRIDE;
+      const currentOffset = (armStart + point) * GEOMETRY_STRIDE;
+      const alphaScale = geometry[currentOffset + GEO_ALPHA_SCALE];
+      const finalAlpha = config.alpha * alphaScale * alphaMultiplier;
+      if (finalAlpha <= 0.005) continue;
+
+      const previousHalf = geometry[previousOffset + GEO_HALF_THICKNESS] * thicknessMultiplier;
+      const currentHalf = geometry[currentOffset + GEO_HALF_THICKNESS] * thicknessMultiplier;
+      const prevPerpX = geometry[previousOffset + GEO_PERP_X];
+      const prevPerpY = geometry[previousOffset + GEO_PERP_Y];
+      const currentPerpX = geometry[currentOffset + GEO_PERP_X];
+      const currentPerpY = geometry[currentOffset + GEO_PERP_Y];
+      const prevCoreX = geometry[previousOffset + GEO_CORE_X];
+      const prevCoreY = geometry[previousOffset + GEO_CORE_Y];
+      const currentCoreX = geometry[currentOffset + GEO_CORE_X];
+      const currentCoreY = geometry[currentOffset + GEO_CORE_Y];
+
+      ctx.fillStyle = `hsla(${config.hue}, 100%, 50%, ${finalAlpha})`;
+      ctx.beginPath();
+      ctx.moveTo(prevCoreX + (prevPerpX * previousHalf), prevCoreY + (prevPerpY * previousHalf));
+      ctx.lineTo(currentCoreX + (currentPerpX * currentHalf), currentCoreY + (currentPerpY * currentHalf));
+      ctx.lineTo(currentCoreX - (currentPerpX * currentHalf), currentCoreY - (currentPerpY * currentHalf));
+      ctx.lineTo(prevCoreX - (prevPerpX * previousHalf), prevCoreY - (prevPerpY * previousHalf));
+      ctx.closePath();
+      ctx.fill();
     }
   }
 }
@@ -214,82 +286,76 @@ function clearTrails() {
   ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
 }
 
+function buildFramePlan() {
+  const spirals = [];
+  const usedAudioSourceIds = new Set();
+
+  for (let index = state.layers.length - 1; index >= 0; index -= 1) {
+    const spiral = state.layers[index];
+    if (spiral.type !== 'spiral' || !spiral.enabled) continue;
+    const runtime = getSpiralRuntime(spiral);
+    spirals.push({ spiral, runtime, config: null });
+    if (spiral.audioSourceId) usedAudioSourceIds.add(spiral.audioSourceId);
+  }
+
+  return { spirals, usedAudioSourceIds };
+}
+
 function renderFrame() {
   clearTrails();
   ctx.globalCompositeOperation = ENGINE_SETTINGS.crossoverBlend;
 
-  updateAudioLevels();
-
   if (state.active) {
-    state.animation.globalRotation += 0.01;
+    const plan = buildFramePlan();
+    updateMediaFades();
+    updateMediaAnalysis(plan.usedAudioSourceIds);
 
-    [...state.spirals].reverse().forEach((spiral) => {
-      if (!spiral.enabled) return;
-      const config = getEffectiveConfig(spiral);
-      drawSpiralPolygon(spiral, config, 1, false);
-    });
+    globalRotation += 0.01;
+    const sampleRate = getAudioSampleRate();
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const frameGeometry = {
+      centerX: width / 2,
+      centerY: height / 2,
+      maxRadius: Math.max(width, height) * 0.6,
+    };
+
+    for (const item of plan.spirals) {
+      item.config = getEffectiveConfig(item.spiral, item.runtime, sampleRate);
+      buildSpiralGeometry(item.runtime, item.config, frameGeometry);
+      drawSpiralGeometry(item.runtime, item.config, 1, 1);
+    }
 
     ctx.globalAlpha = 0.25;
-    [...state.spirals].reverse().forEach((spiral) => {
-      if (!spiral.enabled) return;
-      const config = getEffectiveConfig(spiral);
-      drawSpiralPolygon(spiral, config, 3.5, true);
-    });
+    for (const item of plan.spirals) {
+      drawSpiralGeometry(item.runtime, item.config, 3.5, 0.3);
+    }
     ctx.globalAlpha = 1;
   }
 
   requestAnimationFrame(renderFrame);
 }
 
-function restartMedia() {
-  if (!state.media.objectUrl) return;
-
-  const wasPaused = bgVideo.paused || !state.media.isPlaying;
-  try {
-    bgVideo.currentTime = 0;
-  } catch (error) {
-    console.warn('Could not restart media.', error);
-    return;
-  }
-
-  if (wasPaused) {
-    bgVideo.pause();
-    state.media.isPlaying = false;
-  }
-}
-
-async function handleActiveChanged(active) {
-  if (!state.media.objectUrl) return;
-
-  if (!active) {
-    state.media.resumeOnActive = state.media.isPlaying && !bgVideo.paused;
-    bgVideo.pause();
-    state.media.isPlaying = false;
-    return;
-  }
-
-  if (!state.media.resumeOnActive) return;
-
-  try {
-    if (state.audio.context?.state === 'suspended') {
-      await state.audio.context.resume();
-    }
-    await bgVideo.play();
-    state.media.isPlaying = true;
-    state.media.resumeOnActive = false;
-  } catch (error) {
-    console.error(error);
-  }
+async function handleStateChanged() {
+  const liveSpiralIds = new Set(state.layers.filter((layer) => layer.type === 'spiral').map((layer) => layer.id));
+  spiralRuntimeById.forEach((_, layerId) => { if (!liveSpiralIds.has(layerId)) spiralRuntimeById.delete(layerId); });
+  await syncAllMediaRuntimes();
 }
 
 function init() {
   renderPanel();
   updateActiveButton();
-  bindPanelEvents({ onActiveChanged: handleActiveChanged, onRestart: restartMedia });
+  bindPanelEvents({
+    onStateChanged: handleStateChanged,
+    onActiveChanged: handleActiveChanged,
+    onRestart: restartAllMedia,
+    onChooseMediaFile: processMediaFile,
+  });
   bindPlaybackShortcuts({ onActiveChanged: handleActiveChanged });
   bindMediaDropEvents(processMediaFile);
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas();
+  syncAllMediaRuntimes();
   renderFrame();
 }
 
